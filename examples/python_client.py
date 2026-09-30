@@ -174,6 +174,34 @@ def main() -> None:
     versions = call("GET", f"/api/v1/windows/{w2}/certificates")[1]
     print("版本列表:", [(v["version"], v["verdict"]) for v in versions])
 
+    # ---------- 修订影响报告（仅依据两张证书的不可变快照） ----------
+    show("修订影响报告：比对窗口2 的 v1（不合格）与 v2（整改后）快照")
+    path = (f"/api/v1/certificates/revision-report"
+            f"?old_certificate_id={c1['id']}&new_certificate_id={c2['id']}")
+    code, rep = call("GET", path)
+    assert code == 200, (code, rep)
+    print("读数差异：")
+    for ch in rep["readings_diff"]["changed"]:
+        print(f"  - {ch['reading_id']}: 变更字段 {ch['changed_fields']}  "
+              f"rev {ch['before']['revision']}->{ch['after']['revision']}, "
+              f"温度 {ch['before']['temperature']}->{ch['after']['temperature']}")
+    print("状态变化的半开区间（时间线）：")
+    for seg in rep["timeline"]["changes"]:
+        ev0, ev1 = seg["before"]["evidence"], seg["after"]["evidence"]
+        print(f"  - [{seg['start'][11:19]}, {seg['end'][11:19]}) "
+              f"{seg['before']['status']}({ev0}) -> {seg['after']['status']}({ev1}) "
+              f"{seg['duration_seconds']:g}s")
+    print("汇总结论：", rep["summary"]["conclusion_zh"])
+
+    # 拒绝路径：版本倒序 / 跨窗口 / 同 ID -> 422；证书不存在 -> 404
+    assert call("GET", f"/api/v1/certificates/revision-report"
+                       f"?old_certificate_id={c2['id']}&new_certificate_id={c1['id']}")[0] == 422
+    assert call("GET", f"/api/v1/certificates/revision-report"
+                       f"?old_certificate_id={c1['id']}&new_certificate_id={c1['id']}")[0] == 422
+    assert call("GET", f"/api/v1/certificates/revision-report"
+                       f"?old_certificate_id={c1['id']}&new_certificate_id=99999")[0] == 404
+    print("倒序/同 ID 已拒绝（422），不存在证书已拒绝（404）")
+
     print("\n全部示例执行完成 ✔")
 
 

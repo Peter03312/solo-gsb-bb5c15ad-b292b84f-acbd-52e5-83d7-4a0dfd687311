@@ -143,5 +143,86 @@ class CertificateOut(BaseModel):
     snapshot: dict[str, Any]
 
 
+# ------------------------------------------------------------ 修订影响报告
+
+class ReportReading(BaseModel):
+    reading_id: str
+    revision: int
+    measured_at: str
+    temperature: float
+
+
+class ReportReadingChange(BaseModel):
+    reading_id: str
+    before: ReportReading
+    after: ReportReading
+    changed_fields: list[str] = Field(..., description="revision | measured_at | temperature")
+
+
+class ReportReadingsDiff(BaseModel):
+    added: list[ReportReading]
+    removed: list[ReportReading]
+    changed: list[ReportReadingChange]
+    added_count: int
+    removed_count: int
+    changed_count: int
+
+
+class ReportTimelineSide(BaseModel):
+    status: str
+    # 键随状态而定：已知区段 {"reading_id","revision"}；
+    # sample_gap 另含 unknown_reason 与 left/right 读数 ID/修订号；
+    # boundary_gap 另含 boundary_side=leading|trailing|empty。
+    evidence: dict[str, Any]
+
+
+class ReportTimelineChange(BaseModel):
+    start: str
+    end: str
+    duration_seconds: float
+    before: ReportTimelineSide
+    after: ReportTimelineSide
+
+
+class ReportTimeline(BaseModel):
+    max_sample_interval_seconds: float
+    changes: list[ReportTimelineChange]
+    change_count: int
+
+
+class ReportCertificateRef(BaseModel):
+    id: int
+    window_id: int
+    version: int
+    verdict: str
+    verdict_label_zh: str
+    issued_at: str
+    note: Optional[str]
+
+
+class ReportSummary(BaseModel):
+    verdict_before: str
+    verdict_after: str
+    verdict_before_label_zh: str
+    verdict_after_label_zh: str
+    verdict_changed: bool
+    verdict_direction: str = Field(..., description="改善 | 恶化 | 持平")
+    max_continuous_exceeded_seconds_before: float
+    max_continuous_exceeded_seconds_after: float
+    max_continuous_exceeded_seconds_delta: float
+    max_exceed_seconds_limit: float
+    timeline_change_count: int
+    conclusion_zh: str
+
+
+class RevisionReportOut(BaseModel):
+    window: dict[str, Any]
+    old_certificate: ReportCertificateRef
+    new_certificate: ReportCertificateRef
+    readings_diff: ReportReadingsDiff
+    timeline: ReportTimeline
+    summary: ReportSummary
+
+
 class ErrorBody(BaseModel):
     detail: str

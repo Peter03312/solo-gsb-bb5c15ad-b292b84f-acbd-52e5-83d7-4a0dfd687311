@@ -3,7 +3,9 @@
 对博物馆展柜在指定**审定窗口**内采集到的温度读数进行暴露审定：按时间排序后，
 以“每条读数只覆盖到下一条读数”的采样保持语义切分区段，识别 **正常 / 超限 / 未知**
 区段，计算**最长连续超限时长**，并给出审定结论；支持读数幂等提交、修订替换、
-证书版本化签发（快照不可变）。
+证书版本化签发（快照不可变），并可对同一审定窗口的两张已签发证书生成
+**修订影响报告**（只读快照比对：读数新增/变更、时间线状态变化半开区间、
+结论与最长连续超限时长变化）。
 
 - 技术栈：Python 3.11 · FastAPI · SQLite（WAL 模式）· Pydantic v2
 - 无外部服务依赖，`docker compose up -d` 一键启动并自动初始化数据库
@@ -178,15 +180,100 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `POST` | `/api/v1/windows/{id}/certificates/issue` | 签发（可带 `{"note":"..."}`，也可空 body） |
 | `GET` | `/api/v1/windows/{id}/certificates` | 该窗口全部证书版本（按版本升序） |
 | `GET` | `/api/v1/certificates/{id}` | 按证书主键获取，`snapshot` 为签发时不可变快照 |
+| `GET` | `/api/v1/certificates/revision-report?old_certificate_id=&new_certificate_id=` | 对同一窗口两张已签发证书生成修订影响报告 |
 
 证书含 `id`、`window_id`、`version`、`verdict`、`verdict_label_zh`
 （合格/待定/不合格）、`issued_at`、`note`、`snapshot`。
 
+### 修订影响报告
+
+输入**同一审定窗口**的两张**已签发**证书主键（旧版在前、新版在后），服务只读取
+两证各自的**不可变快照**，不读取当前活动读数，输出：
+
+- `readings_diff`：按 `reading_id` 对齐两版快照读数。
+  - `added`：新版新增读数（含 `revision`/`measured_at`/`temperature`）；
+  - `changed`：两版都存在但读数有变化的项，含 `before`/`after` 全量值与
+    `changed_fields`（`revision` / `measured_at` / `temperature` 子集，
+    采样时间按时刻比较，时区表示不同不视为变化）；
+  - `removed`：新版消失的读数（当前修订规则只替换不删除，正常流程恒为空，
+    字段保留以防数据异常时显式暴露）。
+- `timeline.changes`：用两版快照参数与读数各自重建半开覆盖区段
+  （与第 1 节同一条采样保持/间隔超限/边界空白规则），取两版**全部区段边界
+  的并集**切分后，只保留**状态发生变化**的半开区间，每个区间给出：
+  - `start`/`end`/`duration_seconds`（半开 `[start, end)`）；
+  - `before`/`after`：变化前后 `status`（`normal`/`exceeded`/`unknown`）
+    及该侧证据 `evidence`——
+    - 已知区段：`{"reading_id", "revision"}`（采样保持该区段的读数）；
+    - 未知区段含 `unknown_reason`：`sample_gap`（相邻读数间隔**严格超过**
+      最大采样间隔，附 `left_*`/`right_*` 间隔两侧读数 ID 与修订号）或
+      `boundary_gap`（边界无读数空白，附 `boundary_side`：`leading` 首读
+      之前并给 `right_*` 首条读数、`trailing` 末读之后并给 `left_*` 末条
+      读数、`empty` 整窗无读数两侧均无引用）。
+  - 相邻且变化前后**状态与证据均相同**的区间自动合并（被无变化区间隔开的
+    不合并）。
+- `summary`：审定结论变化（`verdict_before/after`、中文标签、
+  `verdict_direction` 改善/恶化/持平）、最长连续超限时长前后值与增量
+  `max_continuous_exceeded_seconds_delta`、时间线变化区间数，以及一段
+  中文汇总结论 `conclusion_zh`。
+
+> 时间线只输出**状态**变化；若未知原因由“边界空白”变为“采样间隔超限”
+> （或反之）但两侧都仍为 `unknown`，该区间状态未变、不进入 `timeline.changes`，
+> 但该区间在两版快照中对应的未知来源可经上面的证据规则重建。
+
+请求与拒绝约定：
+
+- 查询参数 `old_certificate_id`、`new_certificate_id` 均为证书主键、必填正整数；
+- 任一证书不存在 → `404`；
+- 两 ID 相同、两证不属于同一窗口、或旧版 `version` 不严格小于新版
+  （版本未按先后排列）→ `422`，响应 `detail` 说明具体原因；
+- 报告是只读 GET，不改变任何既有内容；既有证书结构、查询响应与审定规则
+  保持不变（仅新增端点与响应模型）。
+
+报告响应示例（fail → pass 整改）：
+
+```json
+{
+  "old_certificate": {"id": 1, "window_id": 1, "version": 1, "verdict": "fail", "...": "..."},
+  "new_certificate": {"id": 2, "window_id": 1, "version": 2, "verdict": "pass", "...": "..."},
+  "readings_diff": {
+    "added": [], "removed": [],
+    "changed": [{
+      "reading_id": "b",
+      "before": {"reading_id": "b", "revision": 1, "measured_at": "2026-10-01T00:01:00Z", "temperature": 23.0},
+      "after":  {"reading_id": "b", "revision": 2, "measured_at": "2026-10-01T00:01:00Z", "temperature": 20.0},
+      "changed_fields": ["revision", "temperature"]
+    }],
+    "added_count": 0, "removed_count": 0, "changed_count": 2
+  },
+  "timeline": {
+    "max_sample_interval_seconds": 600.0,
+    "change_count": 2,
+    "changes": [{
+      "start": "2026-10-01T00:01:00Z", "end": "2026-10-01T00:07:00Z",
+      "duration_seconds": 360.0,
+      "before": {"status": "exceeded", "evidence": {"reading_id": "b", "revision": 1}},
+      "after":  {"status": "normal",   "evidence": {"reading_id": "b", "revision": 2}}
+    }]
+  },
+  "summary": {
+    "verdict_before": "fail", "verdict_after": "pass",
+    "verdict_direction": "改善", "verdict_changed": true,
+    "max_continuous_exceeded_seconds_before": 420.0,
+    "max_continuous_exceeded_seconds_after": 0.0,
+    "max_continuous_exceeded_seconds_delta": -420.0,
+    "max_exceed_seconds_limit": 300.0,
+    "timeline_change_count": 2,
+    "conclusion_zh": "审定结论：不合格（fail）→ 合格（pass），改善。最长连续超限时长：420s → 0s（减少 420s；限值 300s）。……"
+  }
+}
+```
+
 ### 错误约定
 
-- `404`：窗口/证书不存在
+- `404`：窗口/证书不存在（修订影响报告中任一证书缺失）
 - `409`：同 ID+修订号内容冲突；旧修订号覆盖
-- `422`：无效窗口、窗口外读数、同刻不同读数、缺时区/字段非法等
+- `422`：无效窗口、窗口外读数、同刻不同读数、缺时区/字段非法等；
+  修订影响报告的两证书相同、跨审定窗口、版本未按先后排列也返回 422
 
 ---
 
@@ -195,13 +282,19 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 服务启动后：
 
 ```bash
-# curl 全流程（创建窗口 → 提交/幂等/冲突/修订 → 审定 → 两次签发）
+# curl 全流程（创建窗口 → 提交/幂等/冲突/修订 → 审定 → 两次签发 → 修订影响报告）
 bash examples/curl-examples.sh
 
-# Python 全流程（仅标准库，演示三种结论、拒收、修订、版本快照）
+# Python 全流程（仅标准库，演示三种结论、拒收、修订、版本快照、修订影响报告）
 python3 examples/python_client.py
 # 或指定地址：
 BASE_URL=http://127.0.0.1:8000 python3 examples/python_client.py
+```
+
+修订影响报告最小示例（`OLD_ID`、`NEW_ID` 为同一窗口两张已签发证书主键）：
+
+```bash
+curl -sS "http://localhost:8000/api/v1/certificates/revision-report?old_certificate_id=$OLD_ID&new_certificate_id=$NEW_ID"
 ```
 
 最小示例：
@@ -233,8 +326,12 @@ PYTHONPATH=. python -m pytest tests/ -q
 
 - `tests/test_evaluation.py`：审定算法纯函数测试（未知/超限/合格、
   边界等于、时区归一、区段无缝拼接等）。
+- `tests/test_report.py`：修订影响报告纯函数测试（读数差异、带证据
+  区段、边界对齐、未知来源、区间合并、汇总方向）。
 - `tests/test_api.py`：HTTP 集成测试（幂等、冲突、修订替换、拒收、
   证书版本快照、签发/修订并发串行化）。
+- `tests/test_report_api.py`：修订影响报告 HTTP 测试（fail→pass、
+  边界空白 vs 采样间隔超限、只依快照、跨窗口/倒序/同 ID/不存在拒绝）。
 
 ## 6. 目录结构
 
@@ -243,9 +340,10 @@ app/
   config.py        # 环境变量配置
   database.py      # SQLite 连接、WAL、建表、写事务（BEGIN IMMEDIATE）
   evaluation.py    # 核心审定算法（纯函数）
+  report.py        # 修订影响报告（快照比对、时间线对齐，纯函数）
   models.py        # 结论枚举/常量
   schemas.py       # Pydantic 请求/响应模型
-  services.py      # 窗口、读数、审定、签发业务逻辑
+  services.py      # 窗口、读数、审定、签发、修订影响报告业务逻辑
   main.py          # FastAPI 路由
 examples/
   curl-examples.sh

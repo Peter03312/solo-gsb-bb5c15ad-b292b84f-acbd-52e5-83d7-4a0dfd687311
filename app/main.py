@@ -17,6 +17,7 @@ from .schemas import (
     ReadingOut,
     ReadingSubmit,
     ReadingSubmitResponse,
+    RevisionReportOut,
     WindowCreate,
     WindowOut,
 )
@@ -35,11 +36,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="博物馆展柜温度暴露审定服务",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "对展柜在给定审定窗口内的温度读数进行暴露审定："
         "输出正常/超限/未知区段与最长连续超限时长，"
-        "并支持读数修订、幂等提交、证书版本化签发。"
+        "支持读数修订、幂等提交、证书版本化签发，"
+        "并可对同一窗口两张已签发证书的不可变快照生成修订影响报告。"
     ),
     lifespan=lifespan,
 )
@@ -153,6 +155,29 @@ def list_certificates(
     window_id: int, conn: sqlite3.Connection = Depends(get_conn)
 ) -> list[dict[str, Any]]:
     return services.list_certificates(conn, window_id)
+
+
+# 注意：本静态路径必须注册在 /api/v1/certificates/{certificate_id} 之前，
+# 否则 "revision-report" 会先被 {certificate_id:int} 匹配并触发 422。
+@app.get("/api/v1/certificates/revision-report",
+         response_model=RevisionReportOut, tags=["certificates"])
+def get_revision_report(
+    old_certificate_id: int = Query(..., ge=1, description="旧版（较早签发）证书主键 ID"),
+    new_certificate_id: int = Query(..., ge=1, description="新版（较晚签发）证书主键 ID"),
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """对同一审定窗口两张已签发证书的不可变快照生成修订影响报告。
+
+    只依据所选快照比较，不读取当前活动读数：
+    - 读数差异（新增/变更读数，比较 revision、采样时间、温度）；
+    - 两版审定时间线按全部区段边界对齐后，状态发生变化的半开区间，
+      含变化前后状态、各侧读数 ID/修订号，未知侧区分
+      “采样间隔超限（sample_gap）”与“边界空白（boundary_gap）”；
+    - 汇总结论与最长连续超限时长的变化。
+    窗口不一致、版本未按先后排列（旧版版本号须严格小于新版）、
+    两 ID 相同均返回 422；证书不存在返回 404。
+    """
+    return services.revision_report(conn, old_certificate_id, new_certificate_id)
 
 
 @app.get("/api/v1/certificates/{certificate_id}", response_model=CertificateOut,

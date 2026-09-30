@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 
 from .evaluation import evaluate
 from .models import VERDICT_LABELS_ZH
+from .report import build_revision_report
 from .schemas import ReadingSubmit, WindowCreate
 from .timeutils import parse_stored, to_iso, to_utc
 
@@ -316,14 +317,18 @@ def issue_certificate(
     return get_certificate(conn, int(cur.lastrowid))
 
 
-def get_certificate(conn: sqlite3.Connection, certificate_id: int) -> dict[str, Any]:
+def get_certificate_row(conn: sqlite3.Connection, certificate_id: int) -> sqlite3.Row:
     row = conn.execute(
         "SELECT * FROM certificates WHERE id=?", (certificate_id,)
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                             detail=f"证书 {certificate_id} 不存在")
-    return certificate_to_dict(row)
+    return row
+
+
+def get_certificate(conn: sqlite3.Connection, certificate_id: int) -> dict[str, Any]:
+    return certificate_to_dict(get_certificate_row(conn, certificate_id))
 
 
 def list_certificates(conn: sqlite3.Connection, window_id: int) -> list[dict[str, Any]]:
@@ -346,3 +351,64 @@ def certificate_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "note": row["note"],
         "snapshot": json.loads(row["snapshot_json"]),
     }
+
+
+# ---------------------------------------------------------------- 修订影响报告
+
+def revision_report(conn: sqlite3.Connection,
+                    old_certificate_id: int,
+                    new_certificate_id: int) -> dict[str, Any]:
+    """对同一审定窗口的两张已签发证书生成修订影响报告。
+
+    只读取证书行的不可变快照，不触碰当前活动读数；窗口不一致或版本未按
+    先后排列时以 422 明确拒绝，证书不存在由取行函数返回 404。
+    """
+    if old_certificate_id == new_certificate_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"old_certificate_id 与 new_certificate_id 相同（均为 {old_certificate_id}）："
+                "修订影响报告必须输入新旧两个不同版本的证书。"
+            ),
+        )
+
+    old_row = get_certificate_row(conn, old_certificate_id)
+    new_row = get_certificate_row(conn, new_certificate_id)
+
+    if old_row["window_id"] != new_row["window_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "两张证书不属于同一审定窗口，拒绝生成报告："
+                f"旧证书 {old_row['id']} 属于窗口 {old_row['window_id']}，"
+                f"新证书 {new_row['id']} 属于窗口 {new_row['window_id']}。"
+            ),
+        )
+
+    # 同一窗口主键相同即视为同一窗口；快照内窗口时间为防御性二次校验。
+    old_snap, new_snap = json.loads(old_row["snapshot_json"]), json.loads(new_row["snapshot_json"])
+    ow, nw = old_snap["window"], new_snap["window"]
+    if ow["start_at"] != nw["start_at"] or ow["end_at"] != nw["end_at"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"证书 {old_row['id']} 与 {new_row['id']} 的审定窗口边界快照不一致，"
+                f"拒绝生成报告：[{ow['start_at']}, {ow['end_at']}) vs "
+                f"[{nw['start_at']}, {nw['end_at']})。"
+            ),
+        )
+
+    if old_row["version"] >= new_row["version"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "证书版本未按先后排列，拒绝生成报告："
+                f"old_certificate_id={old_row['id']}（窗口 {old_row['window_id']} "
+                f"版本 {old_row['version']}），new_certificate_id={new_row['id']}"
+                f"（版本 {new_row['version']}）；要求旧版版本号严格小于新版。"
+            ),
+        )
+
+    old_cert = certificate_to_dict(old_row)
+    new_cert = certificate_to_dict(new_row)
+    return build_revision_report(old_cert, new_cert)

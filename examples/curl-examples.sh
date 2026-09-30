@@ -66,3 +66,15 @@ api POST "/api/v1/windows/$WID/certificates/issue" '{"note":"修订后重新签�
 
 echo "== 10. 列出全部证书版本 =="
 api GET "/api/v1/windows/$WID/certificates" | python3 -m json.tool
+
+echo "== 11. 修订影响报告：比对 v1/v2 两张已签发证书的不可变快照 =="
+# 从版本列表取两个证书主键 ID
+mapfile -t CIDS < <(api GET "/api/v1/windows/$WID/certificates" \
+  | python3 -c "import sys,json;print(*[c['id'] for c in json.load(sys.stdin)])")
+OLD_ID="${CIDS[0]}"; NEW_ID="${CIDS[1]}"
+api GET "/api/v1/certificates/revision-report?old_certificate_id=$OLD_ID&new_certificate_id=$NEW_ID" \
+  | python3 -m json.tool
+
+echo "== 12. 报告拒绝：版本倒序 / 跨窗口 / 同 ID（均 422），不存在 404 =="
+api GET "/api/v1/certificates/revision-report?old_certificate_id=$NEW_ID&new_certificate_id=$OLD_ID" || true
+api GET "/api/v1/certificates/revision-report?old_certificate_id=$OLD_ID&new_certificate_id=99999" || true
