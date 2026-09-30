@@ -58,11 +58,25 @@ echo "== 7. 查看当前审定（区段 + 最长连续超限 + 结论）=="
 api GET "/api/v1/windows/$WID/evaluation" | python3 -m json.tool
 
 echo "== 8. 首次签发（v1）=="
-api POST "/api/v1/windows/$WID/certificates/issue" '{"note":"首次签发"}' | python3 -m json.tool
+C1=$(api POST "/api/v1/windows/$WID/certificates/issue" '{"note":"首次签发"}')
+echo "$C1" | python3 -m json.tool
+C1_ID=$(echo "$C1" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 
 echo "== 9. 修订 r-02 为正常值后再次签发（v2；v1 快照不变）=="
 api POST "/api/v1/windows/$WID/readings" '{"reading_id":"r-02","revision":2,"measured_at":"2026-10-01T00:20:00Z","temperature":20.2}' >/dev/null
-api POST "/api/v1/windows/$WID/certificates/issue" '{"note":"修订后重新签发"}' | python3 -m json.tool
+C2=$(api POST "/api/v1/windows/$WID/certificates/issue" '{"note":"修订后重新签发"}')
+echo "$C2" | python3 -m json.tool
+C2_ID=$(echo "$C2" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
 
 echo "== 10. 列出全部证书版本 =="
 api GET "/api/v1/windows/$WID/certificates" | python3 -m json.tool
+
+echo "== 11. 修订影响报告（对比 v1 与 v2 的不可变快照；只读快照，不读当前活动读数）=="
+api POST /api/v1/certificates/revision-impact-report \
+  "{\"old_certificate_id\":$C1_ID,\"new_certificate_id\":$C2_ID}" | python3 -m json.tool
+
+echo "== 12. 拒绝场景：版本倒置 / 同一张证书 =="
+api POST /api/v1/certificates/revision-impact-report \
+  "{\"old_certificate_id\":$C2_ID,\"new_certificate_id\":$C1_ID}" || true
+api POST /api/v1/certificates/revision-impact-report \
+  "{\"old_certificate_id\":$C1_ID,\"new_certificate_id\":$C1_ID}" || true

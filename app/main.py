@@ -17,6 +17,8 @@ from .schemas import (
     ReadingOut,
     ReadingSubmit,
     ReadingSubmitResponse,
+    RevisionImpactReportOut,
+    RevisionReportRequest,
     WindowCreate,
     WindowOut,
 )
@@ -161,3 +163,24 @@ def get_certificate(
     certificate_id: int, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     return services.get_certificate(conn, certificate_id)
+
+
+# ---------------------------------------------------------------- 修订影响报告
+
+@app.post(
+    "/api/v1/certificates/revision-impact-report",
+    response_model=RevisionImpactReportOut,
+    tags=["certificates"],
+)
+def revision_impact_report(
+    payload: RevisionReportRequest,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """对同一审定窗口的旧版、新版两张已签发证书生成修订影响报告。
+
+    仅依据两张证书签发时固化的不可变快照，不读取当前活动读数；
+    窗口不一致、版本未按先后排列或证书不存在时分别 409/404 拒绝。
+    """
+    return services.create_revision_impact_report(
+        conn, payload.old_certificate_id, payload.new_certificate_id
+    )

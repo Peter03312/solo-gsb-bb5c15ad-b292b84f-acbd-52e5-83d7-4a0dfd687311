@@ -178,14 +178,62 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `POST` | `/api/v1/windows/{id}/certificates/issue` | 签发（可带 `{"note":"..."}`，也可空 body） |
 | `GET` | `/api/v1/windows/{id}/certificates` | 该窗口全部证书版本（按版本升序） |
 | `GET` | `/api/v1/certificates/{id}` | 按证书主键获取，`snapshot` 为签发时不可变快照 |
+| `POST` | `/api/v1/certificates/revision-impact-report` | 对同一窗口旧版/新版两张证书生成修订影响报告 |
 
 证书含 `id`、`window_id`、`version`、`verdict`、`verdict_label_zh`
 （合格/待定/不合格）、`issued_at`、`note`、`snapshot`。
 
+### 修订影响报告
+
+输入同一审定窗口、按版本先后排列的两张**已签发**证书，报告**只依据两张证书
+签发时固化的不可变快照**，不读取当前活动读数；既有证书内容与其它查询响应
+完全不变。
+
+请求体：
+
+```json
+{ "old_certificate_id": 1, "new_certificate_id": 2 }
+```
+
+响应结构：
+
+- `window` / `old_certificate` / `new_certificate`：窗口与两版证书引用（版本、结论、签发时间）。
+- `reading_diff`：按 `reading_id` 对齐两版快照读数，逐字段比较修订号、采样时间、温度：
+  - `added_readings`：新版新增读数；`removed_readings`：新版缺失的旧版读数；
+  - `changed_readings`：修订号/时间戳/温度任一变化，给出 `before`/`after`
+    及三个 `*_changed` 标记；`unchanged_reading_ids`：完全未变的读数 ID。
+- `changed_segments`：把两版审定时间线按**所有区段边界**（窗口起止 + 两版
+  全部原始区段边界）切成半开区间对齐后，**仅输出状态发生变化的区间**。每段含：
+  - `before` / `after`：变化前后状态（`normal`/`exceeded`/`unknown` 及中文标签）；
+  - 各侧 `evidence`：支撑该状态的读数——采样保持区间给出 `from_reading`
+    （读数 ID、修订号、时间、温度），采样间隔超限区间另给 `to_reading`；
+  - 未知成因：`sample_gap`（相邻读数间隔严格大于 `max_sample_interval_seconds`）、
+    `boundary_gap`（窗口起点到首读 / 末读到终点的边界空白）、
+    `no_readings`（窗口内完全没有有效读数，前后边界空白同时存在、无法进一步区分）。
+  - 相邻且两侧状态与证据（读数 ID+修订号、未知成因）均相同的区间已合并。
+- `summary`：结论变化前后、`max_continuous_exceeded_seconds` 前后值与差值
+  （即最长连续超限时长的变化）、状态转移计数、变化区域内各状态时长、中文结论。
+- `basis.source = "certificate_snapshots"`：声明数据依据。
+
+最小调用：
+
+```bash
+curl -sS http://localhost:8000/api/v1/certificates/revision-impact-report \
+  -H 'Content-Type: application/json' \
+  -d '{"old_certificate_id":1,"new_certificate_id":2}'
+```
+
+拒绝约定：
+
+- `404`：旧版或新版证书不存在（错误信息标明是哪一张）；
+- `409`：两张证书属于不同审定窗口；版本未按先后排列（旧版版本号不低于新版）；
+  新旧为同一张证书；
+- `422`：请求体缺字段或 ID 非法。
+
 ### 错误约定
 
 - `404`：窗口/证书不存在
-- `409`：同 ID+修订号内容冲突；旧修订号覆盖
+- `409`：同 ID+修订号内容冲突；旧修订号覆盖；修订影响报告的窗口不一致/版本倒置/同一证书
 - `422`：无效窗口、窗口外读数、同刻不同读数、缺时区/字段非法等
 
 ---
@@ -195,10 +243,10 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 服务启动后：
 
 ```bash
-# curl 全流程（创建窗口 → 提交/幂等/冲突/修订 → 审定 → 两次签发）
+# curl 全流程（创建窗口 → 提交/幂等/冲突/修订 → 审定 → 两次签发 → 修订影响报告）
 bash examples/curl-examples.sh
 
-# Python 全流程（仅标准库，演示三种结论、拒收、修订、版本快照）
+# Python 全流程（仅标准库，演示三种结论、拒收、修订、版本快照、修订影响报告）
 python3 examples/python_client.py
 # 或指定地址：
 BASE_URL=http://127.0.0.1:8000 python3 examples/python_client.py
@@ -235,6 +283,10 @@ PYTHONPATH=. python -m pytest tests/ -q
   边界等于、时区归一、区段无缝拼接等）。
 - `tests/test_api.py`：HTTP 集成测试（幂等、冲突、修订替换、拒收、
   证书版本快照、签发/修订并发串行化）。
+- `tests/test_report.py`：修订影响报告纯函数测试（读数增改删、
+  时间线边界对齐、边界空白/采样间隔超限/无读数三种未知成因、相邻区间合并）。
+- `tests/test_report_api.py`：报告 HTTP API 集成测试（端到端报告、
+  404/409/422 拒绝、报告只随快照不随当前活动读数变化）。
 
 ## 6. 目录结构
 

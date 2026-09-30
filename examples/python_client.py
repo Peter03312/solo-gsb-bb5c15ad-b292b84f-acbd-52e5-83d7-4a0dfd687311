@@ -9,7 +9,9 @@
   1) 创建三个审定窗口，分别得到 待定 / 不合格 / 合格；
   2) 幂等提交、同修订号内容冲突 409、旧修订号 409、高修订号替换重算；
   3) 窗口外读数、同刻读数拒收；
-  4) 首次签发、修订后再次签发形成新版本，旧版本快照保持不变。
+  4) 首次签发、修订后再次签发形成新版本，旧版本快照保持不变；
+  5) 对同一窗口的旧版/新版证书生成修订影响报告（只读快照），
+     并演示证书不存在、同一证书、跨窗口、版本倒置等拒绝场景。
 """
 from __future__ import annotations
 
@@ -84,6 +86,8 @@ def main() -> None:
     ev = call("GET", f"/api/v1/windows/{w1}/evaluation")[1]
     print(summary(ev))
     assert ev["verdict"] == "pending"
+    w1_cert = call("POST", f"/api/v1/windows/{w1}/certificates/issue", {"note": "待定留档"})[1]
+    w1_cert_id = w1_cert["id"]
 
     # ---------- 窗口 2：不合格（连续超限 7 分钟 > 5 分钟） ----------
     show("窗口2：连续超限 420s 超过限值 300s -> 不合格")
@@ -173,6 +177,53 @@ def main() -> None:
 
     versions = call("GET", f"/api/v1/windows/{w2}/certificates")[1]
     print("版本列表:", [(v["version"], v["verdict"]) for v in versions])
+
+    # ---------- 修订影响报告（只依据两张证书快照） ----------
+    show("修订影响报告：对比窗口2 的 v1（不合格）与 v2（整改后）")
+    code, rep = call("POST", "/api/v1/certificates/revision-impact-report",
+                     {"old_certificate_id": c1["id"], "new_certificate_id": c2["id"]})
+    assert code == 200, rep
+    d = rep["reading_diff"]
+    print(f"读数：新增 {d['counts']['added']} 条、变更 {d['counts']['changed']} 条、"
+          f"删除 {d['counts']['removed']} 条、未变 {d['counts']['unchanged']} 条")
+    for ch in d["changed_readings"]:
+        print(f"  变更读数 {ch['reading_id']}: rev{ch['before']['revision']} "
+              f"{ch['before']['temperature']}°C -> rev{ch['after']['revision']} "
+              f"{ch['after']['temperature']}°C")
+    s = rep["summary"]
+    print(f"结论：{s['verdict_before_zh']} -> {s['verdict_after_zh']}；"
+          f"最长连续超限 {s['max_continuous_exceeded_before_seconds']}s -> "
+          f"{s['max_continuous_exceeded_after_seconds']}s "
+          f"(Δ {s['max_continuous_exceeded_delta_seconds']}s)")
+    print(f"状态变化的半开区间 {s['changed_segment_count']} 段：{s['status_transition_counts']}")
+    for seg in rep["changed_segments"]:
+        before, after = seg["before"], seg["after"]
+        extra = ""
+        if before["evidence"].get("unknown_reason_code"):
+            extra = f"，未知成因={before['evidence']['unknown_reason_code']}"
+        print(f"  [{seg['start']}, {seg['end']}) {seg['duration_seconds']}s: "
+              f"{before['status_zh']} -> {after['status_zh']}{extra}")
+    for line in s["conclusions_zh"]:
+        print("  结论:", line)
+    assert rep["basis"]["source"] == "certificate_snapshots"
+
+    # 拒绝场景：证书不存在 / 同一张证书 / 跨窗口 / 版本倒置
+    code, r = call("POST", "/api/v1/certificates/revision-impact-report",
+                   {"old_certificate_id": c1["id"], "new_certificate_id": 9999})
+    print("证书不存在:", code)
+    assert code == 404
+    code, _ = call("POST", "/api/v1/certificates/revision-impact-report",
+                   {"old_certificate_id": c1["id"], "new_certificate_id": c1["id"]})
+    print("同一张证书:", code)
+    assert code == 409
+    code, _ = call("POST", "/api/v1/certificates/revision-impact-report",
+                   {"old_certificate_id": c2["id"], "new_certificate_id": c1["id"]})
+    print("版本倒置:", code)
+    assert code == 409
+    code, r = call("POST", "/api/v1/certificates/revision-impact-report",
+                   {"old_certificate_id": c1["id"], "new_certificate_id": w1_cert_id})
+    print("跨窗口:", code, "-", r["detail"][:40], "...")
+    assert code == 409
 
     print("\n全部示例执行完成 ✔")
 

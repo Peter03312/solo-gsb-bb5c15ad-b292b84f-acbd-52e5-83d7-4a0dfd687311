@@ -143,5 +143,105 @@ class CertificateOut(BaseModel):
     snapshot: dict[str, Any]
 
 
+# ------------------------------------------------ 修订影响报告
+
+class RevisionReportRequest(BaseModel):
+    """对同一窗口的两张已签发证书生成修订影响报告。
+
+    old_certificate_id 必须是早于 new_certificate_id 签发的旧版本；
+    报告只依据两张证书的不可变快照，不读取当前活动读数。
+    """
+
+    old_certificate_id: int = Field(..., ge=1, description="旧版证书 ID（先签发）")
+    new_certificate_id: int = Field(..., ge=1, description="新版证书 ID（后签发）")
+
+
+class ReadingRefOut(BaseModel):
+    reading_id: Optional[str]
+    revision: Optional[int]
+    measured_at: Optional[str] = None
+    temperature: Optional[float] = None
+
+
+class SegmentEvidenceOut(BaseModel):
+    kind: str = Field(..., description="sample | sample_gap | boundary_gap")
+    from_reading: Optional[ReadingRefOut]
+    to_reading: Optional[ReadingRefOut]
+    unknown_reason_code: Optional[str] = Field(
+        None, description="boundary_gap | sample_gap | no_readings（仅未知区段）")
+    unknown_reason_zh: Optional[str]
+
+
+class SegmentSideOut(BaseModel):
+    status: str
+    status_zh: str
+    evidence: SegmentEvidenceOut
+
+
+class ChangedSegmentOut(BaseModel):
+    start: str
+    end: str
+    duration_seconds: float
+    before: SegmentSideOut
+    after: SegmentSideOut
+
+
+class AddedOrRemovedReadingOut(BaseModel):
+    reading_id: str
+    revision: int
+    measured_at: str
+    temperature: float
+
+
+class ReadingValueOut(BaseModel):
+    revision: int
+    measured_at: str
+    temperature: float
+
+
+class ChangedReadingOut(BaseModel):
+    reading_id: str
+    before: ReadingValueOut
+    after: ReadingValueOut
+    revision_changed: bool
+    measured_at_changed: bool
+    temperature_changed: bool
+
+
+class ReadingDiffOut(BaseModel):
+    added_readings: list[AddedOrRemovedReadingOut]
+    changed_readings: list[ChangedReadingOut]
+    removed_readings: list[AddedOrRemovedReadingOut]
+    unchanged_reading_ids: list[str]
+    counts: dict[str, int]
+
+
+class ReportSummaryOut(BaseModel):
+    verdict_changed: bool
+    verdict_before: str
+    verdict_after: str
+    verdict_before_zh: str
+    verdict_after_zh: str
+    max_continuous_exceeded_before_seconds: float
+    max_continuous_exceeded_after_seconds: float
+    max_continuous_exceeded_delta_seconds: float
+    max_exceed_seconds: float
+    changed_segment_count: int
+    status_transition_counts: dict[str, int]
+    changed_area_status_seconds_before: dict[str, float]
+    changed_area_status_seconds_after: dict[str, float]
+    conclusions_zh: list[str]
+
+
+class RevisionImpactReportOut(BaseModel):
+    window: dict[str, Any]
+    old_certificate: dict[str, Any]
+    new_certificate: dict[str, Any]
+    reading_diff: ReadingDiffOut
+    changed_segments: list[ChangedSegmentOut]
+    summary: ReportSummaryOut
+    basis: dict[str, str]
+
+
 class ErrorBody(BaseModel):
     detail: str

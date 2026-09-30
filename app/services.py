@@ -346,3 +346,63 @@ def certificate_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "note": row["note"],
         "snapshot": json.loads(row["snapshot_json"]),
     }
+
+
+# ---------------------------------------------------------------- 修订影响报告
+
+def _get_certificate_row(
+    conn: sqlite3.Connection, certificate_id: int
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM certificates WHERE id=?", (certificate_id,)
+    ).fetchone()
+
+
+def create_revision_impact_report(
+    conn: sqlite3.Connection, old_certificate_id: int, new_certificate_id: int
+) -> dict[str, Any]:
+    """基于两张证书的不可变快照生成修订影响报告（只读，不触碰活动读数）。"""
+    if old_certificate_id == new_certificate_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="旧版与新版证书不能是同一张证书，无法比较修订影响",
+        )
+
+    old_row = _get_certificate_row(conn, old_certificate_id)
+    if old_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"旧版证书 {old_certificate_id} 不存在",
+        )
+    new_row = _get_certificate_row(conn, new_certificate_id)
+    if new_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"新版证书 {new_certificate_id} 不存在",
+        )
+
+    if old_row["window_id"] != new_row["window_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"两张证书不属于同一审定窗口：证书 {old_certificate_id} 属于窗口 "
+                f"{old_row['window_id']}，证书 {new_certificate_id} 属于窗口 "
+                f"{new_row['window_id']}；修订影响报告仅支持同一审定窗口的两个版本"
+            ),
+        )
+
+    if old_row["version"] >= new_row["version"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"版本顺序错误：旧版证书 {old_certificate_id} 的版本号为 "
+                f"v{old_row['version']}，新版证书 {new_certificate_id} 为 "
+                f"v{new_row['version']}；旧版必须是更早签发的更低版本"
+            ),
+        )
+
+    # 延迟导入：report 依赖 evaluation，services 自身被 report 间接引用时避免环
+    from .report import build_revision_impact_report
+
+    return build_revision_impact_report(certificate_to_dict(old_row),
+                                        certificate_to_dict(new_row))
